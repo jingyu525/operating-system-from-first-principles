@@ -1,0 +1,19 @@
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts
+labs/*/bin/
+labs/*/obj/
+*.o
+*.out
+*.exe
+
+# Logs
+*.log

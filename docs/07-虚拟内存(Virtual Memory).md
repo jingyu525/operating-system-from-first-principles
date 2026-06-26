@@ -1,0 +1,305 @@
+# 07 — 虚拟内存 (Virtual Memory)
+
+---
+
+## 这一章回答什么问题？
+
+> 为什么每个程序都觉得自己独占了全部内存？`0x1000` 地址在两个不同程序里，为什么互不影响？
+
+---
+
+## 第一性原理
+
+```text
+物理内存只有一块。
+但每个进程都觉得自己有一整块连续的、从 0 开始的内存。
+```
+
+这是怎么做到的？
+
+> **虚拟内存 = 每个进程一张"假地图"，操作系统负责把假地址翻译成真地址。**
+
+---
+
+## 推导过程
+
+### 没有虚拟内存的世界
+
+```text
+程序 A：编译时假设自己从地址 0 开始
+程序 B：编译时也假设自己从地址 0 开始
+
+结果：加载到物理内存时，地址冲突！
+```
+
+### 解决方案的历史演进
+
+```text
+1. 重定位 (Relocation) — 加载时修改所有地址引用。
+   问题：慢，且无法阻止进程访问其他进程的内存（安全漏洞）。
+
+2. 分段 (Segmentation) — 把程序分成代码段、数据段等。
+   问题：外碎片（物理内存中有很多无法使用的小空隙）。
+
+3. 分页 (Paging) — 把物理内存分成固定大小的"页"(Page)。
+   ✅ 现代方案：虚拟内存 = 分页 + 按需加载 + 保护 + 共享。
+```
+
+---
+
+## 分页机制
+
+```text
+虚拟地址空间（进程看到的）        物理内存（实际的）
+┌───────────────────┐          ┌───────────────────┐
+│  Page 0           │ ────→    │  Frame 3          │
+│  Page 1           │ ────→    │  Frame 7          │
+│  Page 2           │ ────→    │  Frame 1          │
+│  Page 3           │  (未映射) │  Frame 0          │
+│  ...              │          │  ...              │
+└───────────────────┘          └───────────────────┘
+
+页大小：4KB (x86-64 标准)
+
+关键：虚拟页可以映射到任意物理帧，不需要连续！
+```
+
+---
+
+## 页表 (Page Table)
+
+每个进程有一张页表，记录"虚拟页 → 物理帧"的映射：
+
+```text
+虚拟地址：0x0000 1234 5678 9ABC
+
+x86-64 (4级页表) 拆分：
+┌──────────┬──────────┬──────────┬──────────┬────────────┐
+│  PML4    │  PDPT    │  PD      │  PT      │  Offset    │
+│ (9 bits) │ (9 bits) │ (9 bits) │ (9 bits) │  (12 bits) │
+└──────────┴──────────┴──────────┴──────────┴────────────┘
+
+PML4 (Page Map Level 4)
+  ↓
+PDPT (Page Directory Pointer Table)
+  ↓
+PD (Page Directory)
+  ↓
+PT (Page Table)
+  ↓
+物理页 + 偏移
+```
+
+4 级页表、每级 512 条目、每页 4KB：
+
+```text
+512 × 512 × 512 × 512 × 4KB = 256TB 虚拟地址空间
+```
+
+---
+
+## TLB：为什么页表查找不慢？
+
+```text
+问题：每次内存访问都要查 4 级页表 → 4 次内存读取 → 200+ cycles
+
+解决方案：TLB (Translation Lookaside Buffer)
+  → CPU 内部的小型硬件缓存（通常 ~64-1024 条目）
+  → 缓存最近的虚拟→物理映射
+  → 命中：0.5-1 cycle
+  → 未命中：走完整页表查询
+```
+
+这就是为什么 Context Switch 切换 CR3 影响很大——整个 TLB 失效！
+
+---
+
+## mmap：虚拟内存的核心应用
+
+```text
+mmap = 把文件映射到虚拟地址空间
+
+传统 read()：
+磁盘 → Page Cache (内核) → 用户 buffer (拷贝！)
+
+mmap：
+磁盘 → Page Cache (内核) ←→ 用户虚拟地址空间 (零拷贝！)
+```
+
+Go 的 GC 用 mmap 申请堆内存：
+
+```text
+Go Heap
+  ↓
+runtime.mmap()  ← 向 OS 申请虚拟地址空间
+  ↓
+操作系统只分配虚拟地址，不分配物理内存
+  ↓
+真正写入时才分配物理页（Demand Paging）
+```
+
+---
+
+## 核心概念
+
+| 概念 | 本质 |
+|------|------|
+| **虚拟地址** | 进程看到的地址 |
+| **物理地址** | 内存芯片上的实际地址 |
+| **页 (Page)** | 虚拟内存的最小单位 (4KB) |
+| **帧 (Frame)** | 物理内存的最小单位 (4KB) |
+| **页表** | 虚拟→物理的映射表 |
+| **TLB** | 页表的硬件缓存 |
+| **Page Fault** | 访问的页不在物理内存中 |
+| **mmap** | 把文件/设备映射到虚拟地址空间 |
+
+---
+
+## Linux 是怎么实现的？
+
+```bash
+# 查看进程的虚拟内存布局
+cat /proc/self/maps
+
+# 输出示例：
+# 00400000-00401000 r-xp 00000000 08:01 12345  /bin/cat        ← .text
+# 00600000-00601000 r--p 00000000 08:01 12345  /bin/cat        ← .rodata
+# 00601000-00602000 rw-p 00001000 08:01 12345  /bin/cat        ← .data
+# 7f1234000000-7f1234021000 rw-p 00000000 00:00 0              ← heap
+# 7fff12340000-7fff12360000 rw-p 00000000 00:00 0              ← [stack]
+```
+
+```bash
+# 查看页表信息
+cat /proc/self/status | grep -i vm
+# VmPeak, VmSize, VmRSS (真正占用的物理内存)
+
+# 查看大页
+cat /proc/meminfo | grep -i huge
+```
+
+---
+
+## Go 是怎么利用它的？
+
+### 1. 堆内存通过 mmap 分配
+
+```go
+// Go runtime 内部（你不需要写这种代码）：
+// runtime.sysMap → runtime.mmap
+// mmap 返回虚拟地址 → 写入时才分配物理页
+```
+
+### 2. GC 与虚拟内存
+
+```text
+Go GC 触发
+  ↓
+STW (Stop The World) 标记阶段
+  ↓
+扫描所有 goroutine 栈 + 全局变量 → 找存活对象
+  ↓
+并发清扫 (sweep) → 释放未使用的内存页
+  ↓
+如果内存不够 → 调用 mmap 再申请
+```
+
+### 3. 栈自动增长
+
+```go
+// goroutine 初始栈 ~2KB
+// 如果栈不够 → 分配新的大栈 → 复制数据 → 释放旧栈
+// 底层用的是 mmap
+```
+
+---
+
+## 常见面试题
+
+**Q: 为什么每个程序都能用地址 0x1000？**
+
+A: 因为**虚拟内存**。每个进程有自己的页表，0x1000 是虚拟地址，通过页表映射到不同的物理地址。进程 A 的 0x1000 和进程 B 的 0x1000 完全不在同一个物理位置上。
+
+**Q: 什么是 Page Fault？happen 了怎么办？**
+
+A: 进程访问的虚拟页面没有映射到物理内存。OS 检查 → 如果合法（如 Demand Paging）→ 分配物理页，更新页表，重试指令。如果非法（如访问 NULL 指针）→ segfault。
+
+**Q: VIRT (虚拟内存) vs RES (常驻内存) 的区别？**
+
+A:
+- VIRT = 进程申请的虚拟地址空间总量（包括 mmap、共享库等）
+- RES = 进程真正占用的物理内存大小
+
+所以 `top` 里 VIRT 可能很大（几 GB），RES 可能很小（几十 MB）。
+
+---
+
+## 实战
+
+```bash
+# 查看进程内存
+cat /proc/<PID>/maps     # 虚拟内存映射
+cat /proc/<PID>/smaps    # 详细内存统计
+
+# 查看系统内存
+free -h
+cat /proc/meminfo
+
+# 用 pmap 分析进程内存
+pmap -x <PID>
+
+# 查看 Page Fault 统计
+ps -o min_flt,maj_flt -p <PID>
+# min_flt: 不需要磁盘 IO 的缺页（从 free list 分配）
+# maj_flt: 需要磁盘 IO 的缺页（从 swap 或文件读取）
+```
+
+```go
+// labs/mmap/main.go
+package main
+
+import (
+    "fmt"
+    "os"
+    "syscall"
+)
+
+func main() {
+    // 用 mmap 读文件（零拷贝）
+    f, _ := os.Open("test.txt")
+    defer f.Close()
+
+    fi, _ := f.Stat()
+    size := fi.Size()
+
+    data, _ := syscall.Mmap(int(f.Fd()), 0, int(size),
+        syscall.PROT_READ, syscall.MAP_SHARED)
+    defer syscall.Munmap(data)
+
+    // 文件内容直接映射到内存，不需要 read() 系统调用
+    fmt.Printf("文件内容: %s\n", string(data))
+}
+```
+
+---
+
+## 总结
+
+> 虚拟内存通过页表给每个进程一个独立的地址空间幻觉，mmap 让文件和内存之间的边界消失了。
+
+---
+
+## 与后端开发的联系
+
+```text
+mmap → Kafka/RocketMQ 用 mmap 实现零拷贝写入
+     → Go GC 用 mmap 管理堆内存
+
+虚拟内存 → 理解 OOM Killer 的触发机制
+        → 理解容器 memory limit 的底层原理
+        → 理解为什么 VIRT 很大但 RES 很小
+
+Page Cache → mmap 的文件修改直接反映到 Page Cache
+            → fysnc 把 Page Cache 刷到磁盘
+            → MySQL 的 Buffer Pool 和 OS Page Cache 的关系
+```
